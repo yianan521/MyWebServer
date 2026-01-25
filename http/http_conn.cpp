@@ -59,6 +59,8 @@ int setnonblocking(int fd)
 //将内核事件表注册读事件，ET模式，选择开启EPOLLONESHOT
 void addfd(int epollfd, int fd, bool one_shot, int TRIGMode)
 {
+        std::cout << "DEBUG: addfd() called - epollfd=" << epollfd << ", fd=" << fd << std::endl;
+    
     epoll_event event;
     event.data.fd = fd;
 
@@ -69,6 +71,8 @@ void addfd(int epollfd, int fd, bool one_shot, int TRIGMode)
 
     if (one_shot)
         event.events |= EPOLLONESHOT;
+    
+    std::cout << "DEBUG: Calling epoll_ctl()" << std::endl;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
     setnonblocking(fd);
 }
@@ -113,22 +117,30 @@ void http_conn::close_conn(bool real_close)
 void http_conn::init(int sockfd, const sockaddr_in &addr, char *root, int TRIGMode,
                      int close_log, string user, string passwd, string sqlname)
 {
+        std::cout << "DEBUG: http_conn::init() - Starting init for fd=" << sockfd << std::endl;
+    std::cout << "DEBUG: m_epollfd=" << m_epollfd << std::endl;
+    std::cout << "DEBUG: root pointer=" << (void*)root << std::endl;
+    
     m_sockfd = sockfd;
     m_address = addr;
-
+    m_TRIGMode = TRIGMode;
+    
+    std::cout << "DEBUG: Before addfd()" << std::endl;
     addfd(m_epollfd, sockfd, true, m_TRIGMode);
+    std::cout << "DEBUG: After addfd()" << std::endl;
+    
     m_user_count++;
 
-    //当浏览器出现连接重置时，可能是网站根目录出错或http响应格式出错或者访问的文件中内容完全为空
     doc_root = root;
-    m_TRIGMode = TRIGMode;
     m_close_log = close_log;
 
     strcpy(sql_user, user.c_str());
     strcpy(sql_passwd, passwd.c_str());
     strcpy(sql_name, sqlname.c_str());
 
+    std::cout << "DEBUG: Before calling internal init()" << std::endl;
     init();
+    std::cout << "DEBUG: After init()" << std::endl;
 }
 
 //初始化新接受的连接
@@ -387,130 +399,238 @@ http_conn::HTTP_CODE http_conn::process_read()
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
-    strcpy(m_real_file, doc_root);
-    int len = strlen(doc_root);
-    //printf("m_url:%s\n", m_url);
+    std::cout << "DEBUG: do_request() called, m_url=" << (m_url ? m_url : "null") << std::endl;
+    
+    if (!doc_root || !m_url) {
+        std::cout << "ERROR: doc_root or m_url is null!" << std::endl;
+        return INTERNAL_ERROR;
+    }
+    
+    // 清空并复制文档根目录
+    memset(m_real_file, '\0', FILENAME_LEN);
+    strncpy(m_real_file, doc_root, FILENAME_LEN - 1);
+    
+    // 获取最后一个 '/' 的位置
     const char *p = strrchr(m_url, '/');
-
-    //处理cgi
-    if (cgi == 1 && (*(p + 1) == '2' || *(p + 1) == '3'))
-    {
-
-        //根据标志判断是登录检测还是注册检测
-        char flag = m_url[1];
-
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/");
-        strcat(m_url_real, m_url + 2);
-        strncpy(m_real_file + len, m_url_real, FILENAME_LEN - len - 1);
-        free(m_url_real);
-
-        //将用户名和密码提取出来
-        //user=123&passwd=123
-        char name[100], password[100];
-        int i;
-        for (i = 5; m_string[i] != '&'; ++i)
-            name[i - 5] = m_string[i];
-        name[i - 5] = '\0';
-
-        int j = 0;
-        for (i = i + 10; m_string[i] != '\0'; ++i, ++j)
-            password[j] = m_string[i];
-        password[j] = '\0';
-
-        if (*(p + 1) == '3')
-        {
-            //如果是注册，先检测数据库中是否有重名的
-            //没有重名的，进行增加数据
-            char *sql_insert = (char *)malloc(sizeof(char) * 200);
-            strcpy(sql_insert, "INSERT INTO user(username, passwd) VALUES(");
-            strcat(sql_insert, "'");
-            strcat(sql_insert, name);
-            strcat(sql_insert, "', '");
-            strcat(sql_insert, password);
-            strcat(sql_insert, "')");
-
-            if (users.find(name) == users.end())
-            {
-                m_lock.lock();
-                int res = mysql_query(mysql, sql_insert);
-                users.insert(pair<string, string>(name, password));
-                m_lock.unlock();
-
-                if (!res)
-                    strcpy(m_url, "/log.html");
-                else
-                    strcpy(m_url, "/registerError.html");
-            }
-            else
-                strcpy(m_url, "/registerError.html");
-        }
-        //如果是登录，直接判断
-        //若浏览器端输入的用户名和密码在表中可以查找到，返回1，否则返回0
-        else if (*(p + 1) == '2')
-        {
-            if (users.find(name) != users.end() && users[name] == password)
-                strcpy(m_url, "/welcome.html");
-            else
-                strcpy(m_url, "/logError.html");
-        }
-    }
-
-    if (*(p + 1) == '0')
-    {
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/register.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-
-        free(m_url_real);
-    }
-    else if (*(p + 1) == '1')
-    {
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/log.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-
-        free(m_url_real);
-    }
-    else if (*(p + 1) == '5')
-    {
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/picture.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-
-        free(m_url_real);
-    }
-    else if (*(p + 1) == '6')
-    {
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/video.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-
-        free(m_url_real);
-    }
-    else if (*(p + 1) == '7')
-    {
-        char *m_url_real = (char *)malloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/fans.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-
-        free(m_url_real);
-    }
-    else
-        strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
-
-    if (stat(m_real_file, &m_file_stat) < 0)
-        return NO_RESOURCE;
-
-    if (!(m_file_stat.st_mode & S_IROTH))
-        return FORBIDDEN_REQUEST;
-
-    if (S_ISDIR(m_file_stat.st_mode))
+    if (!p) {
+        std::cout << "ERROR: No '/' found in URL: " << m_url << std::endl;
         return BAD_REQUEST;
+    }
+    
+    char next_char = *(p + 1); // p+1 指向 '/' 后面的字符
+    
+    // 处理CGI请求（登录/注册）
+    if (cgi == 1 && (next_char == '2' || next_char == '3')) {
+        std::cout << "DEBUG: Processing CGI request" << std::endl;
+        
+        // 检查数据库连接
+        if (!mysql) {
+            std::cout << "ERROR: MySQL connection is null!" << std::endl;
+            if (next_char == '3') {
+                strcpy(m_url, "/registerError.html");
+            } else {
+                strcpy(m_url, "/logError.html");
+            }
+        } else {
+            // 提取用户名和密码
+            char name[100] = {0};
+            char password[100] = {0};
+            
+            // 解析 POST 数据
+            if (m_string) {
+                std::cout << "DEBUG: Raw POST data: [" << m_string << "]" << std::endl;
 
+                // 解析 user=
+                char* user_start = strstr(m_string, "user=");
+                if (user_start) {
+                    user_start += 5; // skip "user="
+                    char* user_end = strchr(user_start, '&');
+                    int len = user_end ? (user_end - user_start) : strlen(user_start);
+                    if (len > 0 && len < 100) {
+                        strncpy(name, user_start, len);
+                        name[len] = '\0';
+                    }
+                }
+
+                // 解析 passwd=
+                char* pass_start = strstr(m_string, "passwd=");
+                if (pass_start) {
+                    pass_start += 7; // skip "passwd="
+                    char* pass_end = strchr(pass_start, '&');
+                    int len = pass_end ? (pass_end - pass_start) : strlen(pass_start);
+                    if (len > 0 && len < 100) {
+                        strncpy(password, pass_start, len);
+                        password[len] = '\0';
+                    }
+                }
+
+                // 辅助函数：去除末尾 \r \n 空格
+                auto trim_crlf = [](char* s) {
+                    int len = strlen(s);
+                    while (len > 0 && (s[len-1] == '\r' || s[len-1] == '\n' || s[len-1] == ' ')) {
+                        s[--len] = '\0';
+                    }
+                };
+                trim_crlf(name);
+                trim_crlf(password);
+            }
+
+            std::cout << "DEBUG: Extracted - name='" << name << "', password='" << password << "'" << std::endl;
+            
+            // 注册（3）
+            if (next_char == '3') {
+                if (strlen(name) == 0 || strlen(password) == 0) {
+                    std::cout << "ERROR: Empty username or password" << std::endl;
+                    strcpy(m_url, "/registerError.html");
+                } else {
+                    // 检查用户是否已存在
+                    char sql_check[256];
+                    snprintf(sql_check, sizeof(sql_check), 
+                             "SELECT username FROM user WHERE username='%s'", name);
+                    
+                    std::cout << "DEBUG: Checking user: " << sql_check << std::endl;
+                    
+                    if (mysql_query(mysql, sql_check) == 0) {
+                        MYSQL_RES* result = mysql_store_result(mysql);
+                        if (result) {
+                            if (mysql_num_rows(result) > 0) {
+                                std::cout << "DEBUG: User already exists: " << name << std::endl;
+                                strcpy(m_url, "/registerError.html");
+                                mysql_free_result(result);
+                            } else {
+                                mysql_free_result(result);
+                                
+                                // 插入新用户
+                                m_lock.lock();
+                                char sql_insert[256];
+                                snprintf(sql_insert, sizeof(sql_insert), 
+                                         "INSERT INTO user(username, passwd) VALUES('%s', '%s')",
+                                         name, password);
+                                
+                                std::cout << "DEBUG: Executing SQL: " << sql_insert << std::endl;
+                                
+                                int res = mysql_query(mysql, sql_insert);
+                                if (res == 0) {
+                                    users[name] = password;
+                                    strcpy(m_url, "/log.html");
+                                    std::cout << "DEBUG: Registration successful for user: " << name << std::endl;
+                                } else {
+                                    std::cout << "MySQL Error: " << mysql_error(mysql) << std::endl;
+                                    strcpy(m_url, "/registerError.html");
+                                    std::cout << "DEBUG: Registration failed for user: " << name << std::endl;
+                                }
+                                m_lock.unlock();
+                            }
+                        }
+                    } else {
+                        std::cout << "MySQL Error (check): " << mysql_error(mysql) << std::endl;
+                        strcpy(m_url, "/registerError.html");
+                    }
+                }
+            }
+            // 登录（2）
+            else if (next_char == '2') {
+                if (strlen(name) == 0 || strlen(password) == 0) {
+                    std::cout << "ERROR: Empty username or password" << std::endl;
+                    strcpy(m_url, "/logError.html");
+                } else {
+                    char sql_query[256];
+                    snprintf(sql_query, sizeof(sql_query), 
+                             "SELECT passwd FROM user WHERE username='%s'", name);
+                    
+                    std::cout << "DEBUG: Querying user: " << sql_query << std::endl;
+                    
+                    if (mysql_query(mysql, sql_query) == 0) {
+                        MYSQL_RES* result = mysql_store_result(mysql);
+                        if (result) {
+                            MYSQL_ROW row = mysql_fetch_row(result);
+                            if (row && row[0]) {
+                                if (strcmp(row[0], password) == 0) {
+                                    strcpy(m_url, "/welcome.html");
+                                    std::cout << "DEBUG: Login successful for user: " << name << std::endl;
+                                } else {
+                                    strcpy(m_url, "/logError.html");
+                                    std::cout << "DEBUG: Password incorrect for user: " << name << std::endl;
+                                }
+                            } else {
+                                strcpy(m_url, "/logError.html");
+                                std::cout << "DEBUG: User not found: " << name << std::endl;
+                            }
+                            mysql_free_result(result);
+                        } else {
+                            strcpy(m_url, "/logError.html");
+                            std::cout << "DEBUG: Query result is null" << std::endl;
+                        }
+                    } else {
+                        std::cout << "MySQL Error: " << mysql_error(mysql) << std::endl;
+                        strcpy(m_url, "/logError.html");
+                    }
+                }
+            }
+            
+            // 重新获取 next_char 因为 m_url 可能被修改
+            p = strrchr(m_url, '/');
+            next_char = p ? *(p + 1) : '\0';
+        }
+    }
+    
+    // 构建实际文件路径
+    if (next_char == '0') {
+        strncat(m_real_file, "/register.html", FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    else if (next_char == '1') {
+        strncat(m_real_file, "/log.html", FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    else if (next_char == '5') {
+        strncat(m_real_file, "/picture.html", FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    else if (next_char == '6') {
+        strncat(m_real_file, "/video.html", FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    else if (next_char == '7') {
+        strncat(m_real_file, "/fans.html", FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    else {
+        strncat(m_real_file, m_url, FILENAME_LEN - strlen(m_real_file) - 1);
+    }
+    
+    std::cout << "DEBUG: Final file path: " << m_real_file << std::endl;
+    
+    // 检查文件状态
+    if (stat(m_real_file, &m_file_stat) < 0) {
+        std::cout << "ERROR: stat failed for file: " << m_real_file 
+                  << ", errno: " << errno << std::endl;
+        return NO_RESOURCE;
+    }
+    
+    if (!(m_file_stat.st_mode & S_IROTH)) {
+        std::cout << "ERROR: File not readable: " << m_real_file << std::endl;
+        return FORBIDDEN_REQUEST;
+    }
+    
+    if (S_ISDIR(m_file_stat.st_mode)) {
+        std::cout << "ERROR: Path is a directory: " << m_real_file << std::endl;
+        return BAD_REQUEST;
+    }
+    
+    // 打开文件并内存映射
     int fd = open(m_real_file, O_RDONLY);
+    if (fd < 0) {
+        std::cout << "ERROR: Failed to open file: " << m_real_file 
+                  << ", errno: " << errno << std::endl;
+        return INTERNAL_ERROR;
+    }
+    
     m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (m_file_address == MAP_FAILED) {
+        std::cout << "ERROR: mmap failed for file: " << m_real_file 
+                  << ", errno: " << errno << std::endl;
+        close(fd);
+        return INTERNAL_ERROR;
+    }
+    
     close(fd);
+    std::cout << "DEBUG: File mapped successfully, size: " << m_file_stat.st_size << " bytes" << std::endl;
     return FILE_REQUEST;
 }
 void http_conn::unmap()
@@ -685,6 +805,7 @@ bool http_conn::process_write(HTTP_CODE ret)
     bytes_to_send = m_write_idx;
     return true;
 }
+
 void http_conn::process()
 {
     HTTP_CODE read_ret = process_read();
@@ -693,10 +814,72 @@ void http_conn::process()
         modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
         return;
     }
-    bool write_ret = process_write(read_ret);
+    
+    m_ret_code = read_ret;  // 保存处理结果
+    
+    // 如果是 CGI 请求，需要数据库连接
+    if (cgi == 1) {
+        // 如果有数据库连接池，从池中获取连接
+        if (m_connPool && m_sql_num > 0 && !mysql) {
+            connectionRAII mysqlcon(&mysql, m_connPool);
+            
+            if (!mysql) {
+                LOG_ERROR("Failed to get MySQL connection for CGI request");
+                m_ret_code = INTERNAL_ERROR;
+            } else {
+                LOG_INFO("MySQL connection acquired for CGI request");
+            }
+        } else if (!mysql) {
+            // 没有数据库连接池，记录错误
+            LOG_ERROR("No database connection available for CGI request");
+            m_ret_code = INTERNAL_ERROR;
+        }
+    }
+    
+    bool write_ret = process_write(m_ret_code);
     if (!write_ret)
     {
         close_conn();
     }
     modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+}
+
+// 重置连接状态（供连接池使用）
+void http_conn::reset() {
+    std::cout << "DEBUG: http_conn::reset() called" << std::endl;
+       m_sockfd = -1;
+    m_state = 0;
+    m_read_idx = 0;
+    m_checked_idx = 0;
+    m_start_line = 0;
+    m_write_idx = 0;
+    m_check_state = CHECK_STATE_REQUESTLINE;
+    m_method = GET;
+    m_url = nullptr;
+    m_version = nullptr;
+    m_host = nullptr;
+    m_content_length = 0;
+    m_linger = false;
+    bytes_to_send = 0;
+    bytes_have_send = 0;
+    cgi = 0;
+    m_string = nullptr;
+    timer_flag = 0;
+    improv = 0;
+    
+    // 重置缓冲区
+    memset(m_read_buf, 0, READ_BUFFER_SIZE);
+    memset(m_write_buf, 0, WRITE_BUFFER_SIZE);
+    memset(m_real_file, 0, FILENAME_LEN);
+    
+    // 释放内存映射
+    unmap();
+    
+    m_file_address = nullptr;
+    m_iv_count = 0;
+    
+    // 重置数据库连接
+    mysql = nullptr;
+    
+    std::cout << "DEBUG: Connection reset" << std::endl;
 }

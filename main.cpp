@@ -2,7 +2,7 @@
 
 int main(int argc, char *argv[])
 {
-    //需要修改的数据库信息,登录名,密码,库名
+    //使用简化的配置
     string user = "yianan";
     string passwd = "123456";
     string databasename = "yourdb";
@@ -13,29 +13,44 @@ int main(int argc, char *argv[])
 
     WebServer server;
 
-    //初始化
-    server.init(config.PORT, user, passwd, databasename, config.LOGWrite, 
-                config.OPT_LINGER, config.TRIGMode,  config.sql_num,  config.thread_num, 
-                config.close_log, config.actor_model);
-    
+    //初始化（设置sql_num为实际连接数）
+    // 注意：这里sql_num=5，表示初始化5个数据库连接
+    server.init(config.PORT, user, passwd, databasename, config.LOGWrite,
+                config.OPT_LINGER, config.TRIGMode, 5,  // sql_num=5，启用数据库
+                config.thread_num, config.close_log, config.actor_model);
 
     //日志
     server.log_write();
 
-    //数据库
+    // 必须调用数据库连接池初始化！
     server.sql_pool();
 
     //线程池
     server.thread_pool();
 
+    // ===== 启用HTTP连接池 =====
+    printf("\n=================================\n");
+    printf("高性能HTTP服务器启动\n");
+    printf("端口: %d\n", config.PORT);
+    printf("线程数: %d\n", config.thread_num);
+    printf("=================================\n\n");
+
+    // 初始化HTTP连接池（100个连接）
+    server.init_conn_pool(100);
+
     //触发模式
     server.trig_mode();
 
     //监听
-    server.eventListen();
+    server.eventListen();  // 这里可能失败
 
     //运行
+    printf("\n=== 服务器开始运行 ===\n");
+    printf("模式: %s\n", server.m_use_conn_pool ? "连接池模式" : "传统模式");
+    printf("等待客户端连接...\n");
+
     server.eventLoop();
 
+    printf("\n=== 服务器停止 ===\n");
     return 0;
 }

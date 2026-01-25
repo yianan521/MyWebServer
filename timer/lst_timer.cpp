@@ -217,8 +217,26 @@ int Utils::u_epollfd = 0;
 class Utils;
 void cb_func(client_data *user_data)
 {
+    if (!user_data) {
+        printf("ERROR: cb_func called with null user_data\n");
+        return;
+    }
+    
+    // 检查 Utils::u_epollfd 是否有效
+    if (Utils::u_epollfd <= 0) {
+        printf("ERROR: Invalid epollfd in cb_func: %d\n", Utils::u_epollfd);
+        return;
+    }
+    
+    // 删除非活动连接在socket上的注册事件
     epoll_ctl(Utils::u_epollfd, EPOLL_CTL_DEL, user_data->sockfd, 0);
-    assert(user_data);
     close(user_data->sockfd);
-    http_conn::m_user_count--;
+    
+    // 减少用户计数
+    if (http_conn::m_user_count > 0) {
+        http_conn::m_user_count--;
+    }
+    
+    printf("cb_func: closed fd %d, remaining users: %d\n", 
+           user_data->sockfd, http_conn::m_user_count);
 }

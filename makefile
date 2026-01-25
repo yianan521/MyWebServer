@@ -1,15 +1,39 @@
-CXX ?= g++
+# 编译器
+CXX = g++
+CXXFLAGS = -g -Wall -std=c++11 -pthread -I./include
 
-DEBUG ?= 1
-ifeq ($(DEBUG), 1)
-    CXXFLAGS += -g
-else
-    CXXFLAGS += -O2
+# 目标文件
+TARGET = server
 
-endif
+# 源文件
+SRCS = main.cpp \
+       timer/lst_timer.cpp \
+       http/http_conn.cpp \
+       log/log.cpp \
+       CGImysql/sql_connection_pool.cpp \
+       webserver.cpp \
+       config.cpp
 
-server: main.cpp  ./timer/lst_timer.cpp ./http/http_conn.cpp ./log/log.cpp ./CGImysql/sql_connection_pool.cpp  webserver.cpp config.cpp
-	$(CXX) -o server  $^ $(CXXFLAGS) -lpthread -lmysqlclient
+# 库文件
+LIBS = -lpthread -lmysqlclient
 
+# 目标文件
+OBJS = $(SRCS:.cpp=.o)
+
+# 默认目标
+all: $(TARGET)
+
+# 链接目标
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+
+# 编译规则
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 清理
 clean:
-	rm  -r server
+	rm -f $(OBJS) $(TARGET)
+
+# 伪目标
+.PHONY: all clean

@@ -91,7 +91,7 @@ bool threadpool<T>::append_p(T *request)
 }
 template <typename T>
 void *threadpool<T>::worker(void *arg)
-{
+{ std::cout << "DEBUG: Thread started" << std::endl;
     threadpool *pool = (threadpool *)arg;
     pool->run();
     return pool;

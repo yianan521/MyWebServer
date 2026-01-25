@@ -1,9 +1,13 @@
 #include "webserver.h"
+#include <iostream>
 
 WebServer::WebServer()
 {
     //http_conn类对象
-    users = new http_conn[MAX_FD];
+    users = new http_conn*[MAX_FD];
+      for (int i = 0; i < MAX_FD; ++i) {
+        users[i] = nullptr;  // 初始化为空
+    }
 
     //root文件夹路径
     char server_path[200];
@@ -15,6 +19,9 @@ WebServer::WebServer()
 
     //定时器
     users_timer = new client_data[MAX_FD];
+    
+    // 连接池使用标志初始化（默认不使用）
+    m_use_conn_pool = false;
 }
 
 WebServer::~WebServer()
@@ -83,19 +90,45 @@ void WebServer::log_write()
             Log::get_instance()->init("./logs/ServerLog", m_close_log, 2000, 800000, 0);
     }
 }
-
 void WebServer::sql_pool()
 {
-    //初始化数据库连接池
+    // 创建连接池对象，但不真正初始化数据库连接
     m_connPool = connection_pool::GetInstance();
-    m_connPool->init("localhost", m_user, m_passWord, m_databaseName, 3306, m_sql_num, m_close_log);
-
-    //初始化数据库读取表
-    users->initmysql_result(m_connPool);
+    
+    std::cout << "\n=== 初始化数据库连接池 ===" << std::endl;
+    std::cout << "DEBUG: sql_num = " << m_sql_num << std::endl;
+    
+    // 只有在需要数据库时才真正初始化
+    if (m_sql_num > 0) {
+        std::cout << "DEBUG: Initializing MySQL connection pool..." << std::endl;
+        std::cout << "DEBUG: User: " << m_user << std::endl;
+        std::cout << "DEBUG: Database: " << m_databaseName << std::endl;
+        
+        // 直接调用，init() 返回 void
+        m_connPool->init("localhost", m_user, m_passWord, 
+                        m_databaseName, 3306, m_sql_num, m_close_log);
+        
+        std::cout << "✓ 数据库连接池初始化完成" << std::endl;
+        
+        // 初始化用户数据 - users 是 http_conn**，需要通过正确的对象调用
+        // 我们需要创建一个 http_conn 对象来调用 initmysql_result
+        if (MAX_FD > 0) {
+            http_conn temp_conn;
+            temp_conn.initmysql_result(m_connPool);
+            std::cout << "✓ 用户数据初始化完成" << std::endl;
+        }
+        
+    } else {
+        std::cout << "DEBUG: Database connection disabled (sql_num = 0)" << std::endl;
+        std::cout << "WARNING: CGI functionality will not work" << std::endl;
+    }
 }
 
 void WebServer::thread_pool()
-{
+{   if (!m_connPool) {
+        m_connPool = connection_pool::GetInstance();
+        // 不初始化数据库连接，但对象存在
+    }
     //线程池
     m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, m_thread_num);
 }
@@ -130,12 +163,17 @@ void WebServer::eventListen()
     ret = bind(m_listenfd, (struct sockaddr *)&address, sizeof(address));
     assert(ret >= 0);
     ret = listen(m_listenfd, 5);
+    if (ret < 0) {
+    perror("listen error");
+    fprintf(stderr, "Failed to listen on port %d\n", m_port);
+    exit(1);
+}
     assert(ret >= 0);
 
     utils.init(TIMESLOT);
 
     //epoll创建内核事件表
-    epoll_event events[MAX_EVENT_NUMBER];
+
     m_epollfd = epoll_create(5);
     assert(m_epollfd != -1);
 
@@ -158,21 +196,24 @@ void WebServer::eventListen()
     Utils::u_epollfd = m_epollfd;
 }
 
-void WebServer::timer(int connfd, struct sockaddr_in client_address)
-{
-    users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
+// 初始化连接池
+void WebServer::init_conn_pool(int size) {
+    printf("=== 初始化HTTP连接池 ===\n");
+    SimpleConnPool::getInstance()->init(size);
+    m_use_conn_pool = true;
+    printf("连接池初始化完成，大小: %d\n", size);
+    show_pool_stats();
+}
 
-    //初始化client_data数据
-    //创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
-    users_timer[connfd].address = client_address;
-    users_timer[connfd].sockfd = connfd;
-    util_timer *timer = new util_timer;
-    timer->user_data = &users_timer[connfd];
-    timer->cb_func = cb_func;
-    time_t cur = time(NULL);
-    timer->expire = cur + 3 * TIMESLOT;
-    users_timer[connfd].timer = timer;
-    utils.m_timer_lst.add_timer(timer);
+// 显示连接池统计
+void WebServer::show_pool_stats() {
+    if (m_use_conn_pool) {
+        int freeCount, usedCount, totalCount;
+        SimpleConnPool::getInstance()->getStats(freeCount, usedCount, totalCount);
+        printf("连接池统计: 空闲=%d, 使用中=%d, 总容量=%d, 利用率=%.1f%%\n",
+               freeCount, usedCount, totalCount, 
+               (usedCount * 100.0) / totalCount);
+    }
 }
 
 //若有数据传输，则将定时器往后延迟3个单位
@@ -186,15 +227,78 @@ void WebServer::adjust_timer(util_timer *timer)
     LOG_INFO("%s", "adjust timer once");
 }
 
-void WebServer::deal_timer(util_timer *timer, int sockfd)
+void WebServer::timer(int connfd, struct sockaddr_in client_address)
 {
-    timer->cb_func(&users_timer[sockfd]);
-    if (timer)
-    {
-        utils.m_timer_lst.del_timer(timer);
+    http_conn* conn = nullptr;
+    
+    if (m_use_conn_pool) {
+        // 从连接池获取连接
+     conn = SimpleConnPool::getInstance()->acquire();
+        printf("连接池[获取]: 为客户端 fd=%d 分配连接\n", connfd);
+             // 设置数据库连接池
+        if (m_connPool && m_sql_num > 0) {
+            conn->set_conn_pool(m_connPool);
+        }
+
+        // 初始化连接
+        conn->init(connfd, client_address, m_root, m_CONNTrigmode, 
+                   m_close_log, m_user, m_passWord, m_databaseName);
+        
+        // 将连接复制到 users 数组以保持兼容性
+        users[connfd] = conn;
+    } else {
+        // 传统方式：
+        conn = new http_conn();
+        conn->init(connfd, client_address, m_root, m_CONNTrigmode,
+                   m_close_log, m_user, m_passWord, m_databaseName);
+        users[connfd] = conn;  
     }
 
-    LOG_INFO("close fd %d", users_timer[sockfd].sockfd);
+    //初始化client_data数据
+    //创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
+    users_timer[connfd].address = client_address;
+    users_timer[connfd].sockfd = connfd;
+    util_timer *timer = new util_timer;
+    timer->user_data = &users_timer[connfd];
+    timer->cb_func = cb_func;
+    time_t cur = time(NULL);
+    timer->expire = cur + 3 * TIMESLOT;
+    users_timer[connfd].timer = timer;
+    utils.m_timer_lst.add_timer(timer);
+    
+    // 显示连接池统计
+    if (m_use_conn_pool) {
+        show_pool_stats();
+    }
+}
+void WebServer::deal_timer(util_timer* timer, int sockfd) {
+    if (timer) {
+        // 获取连接指针
+        http_conn* conn = users[sockfd];
+        
+        if (conn) {
+            // 重置连接状态
+            conn->reset();
+            
+            // 如果使用连接池，归还连接
+            if (m_use_conn_pool) {
+                SimpleConnPool::getInstance()->release(conn);
+                printf("连接池[释放]: 连接 fd=%d 已归还\n", sockfd);
+                show_pool_stats();
+            } else {
+                // 传统方式：删除对象
+                delete conn;
+            }
+            
+            users[sockfd] = nullptr;  // 清空指针
+        }
+        
+        timer->cb_func(&users_timer[sockfd]);
+        if (timer == users_timer[sockfd].timer) {
+            users_timer[sockfd].timer = NULL;
+        }
+        delete timer;
+    }
 }
 
 bool WebServer::dealclientdata()
@@ -290,18 +394,18 @@ void WebServer::dealwithread(int sockfd)
         }
 
         //若监测到读事件，将该事件放入请求队列
-        m_pool->append(users + sockfd, 0);
+        m_pool->append(users[sockfd], 0);
 
         while (true)
         {
-            if (1 == users[sockfd].improv)
+            if (1 == users[sockfd]->improv)
             {
-                if (1 == users[sockfd].timer_flag)
+                if (1 == users[sockfd]->timer_flag)
                 {
                     deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
+                    users[sockfd]->timer_flag = 0;
                 }
-                users[sockfd].improv = 0;
+                users[sockfd]->improv = 0;
                 break;
             }
         }
@@ -309,12 +413,12 @@ void WebServer::dealwithread(int sockfd)
     else
     {
         //proactor
-        if (users[sockfd].read_once())
+        if (users[sockfd]->read_once())
         {
-            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd]->get_address()->sin_addr));
 
             //若监测到读事件，将该事件放入请求队列
-            m_pool->append_p(users + sockfd);
+            m_pool->append_p(users[sockfd]);
 
             if (timer)
             {
@@ -339,18 +443,18 @@ void WebServer::dealwithwrite(int sockfd)
             adjust_timer(timer);
         }
 
-        m_pool->append(users + sockfd, 1);
+        m_pool->append(users[sockfd], 1);
 
         while (true)
         {
-            if (1 == users[sockfd].improv)
+            if (1 == users[sockfd]->improv)
             {
-                if (1 == users[sockfd].timer_flag)
+                if (1 == users[sockfd]->timer_flag)
                 {
                     deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
+                    users[sockfd]->timer_flag = 0;
                 }
-                users[sockfd].improv = 0;
+                users[sockfd]->improv = 0;
                 break;
             }
         }
@@ -358,9 +462,9 @@ void WebServer::dealwithwrite(int sockfd)
     else
     {
         //proactor
-        if (users[sockfd].write())
+        if (users[sockfd]->write())
         {
-            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd]->get_address()->sin_addr));
 
             if (timer)
             {
@@ -374,60 +478,42 @@ void WebServer::dealwithwrite(int sockfd)
     }
 }
 
-void WebServer::eventLoop()
-{
+void WebServer::eventLoop() {
     bool timeout = false;
     bool stop_server = false;
 
-    while (!stop_server)
-    {
+    while (!stop_server) {
         int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
-        if (number < 0 && errno != EINTR)
-        {
-            LOG_ERROR("%s", "epoll failure");
+        if (number < 0 && errno != EINTR) {
             break;
         }
 
-        for (int i = 0; i < number; i++)
-        {
+        for (int i = 0; i < number; i++) {
             int sockfd = events[i].data.fd;
 
-            //处理新到的客户连接
-            if (sockfd == m_listenfd)
-            {
+            // 处理新到的客户端连接
+            if (sockfd == m_listenfd) {
                 bool flag = dealclientdata();
                 if (false == flag)
                     continue;
-            }
-            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-            {
-                //服务器端关闭连接，移除对应的定时器
-                util_timer *timer = users_timer[sockfd].timer;
+            } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
+                // 服务器端关闭连接
+                util_timer* timer = users_timer[sockfd].timer;
                 deal_timer(timer, sockfd);
-            }
-            //处理信号
-            else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
-            {
+            } else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN)) {
+                // 处理信号
                 bool flag = dealwithsignal(timeout, stop_server);
                 if (false == flag)
-                    LOG_ERROR("%s", "dealclientdata failure");
-            }
-            //处理客户连接上接收到的数据
-            else if (events[i].events & EPOLLIN)
-            {
+                    Log::get_instance()->write_log(1, "dealclientdata failure");
+            } else if (events[i].events & EPOLLIN) {
                 dealwithread(sockfd);
-            }
-            else if (events[i].events & EPOLLOUT)
-            {
+            } else if (events[i].events & EPOLLOUT) {
                 dealwithwrite(sockfd);
             }
         }
-        if (timeout)
-        {
+        if (timeout) {
             utils.timer_handler();
-
-            LOG_INFO("%s", "timer tick");
-
+            Log::get_instance()->write_log(0, "timer tick");
             timeout = false;
         }
     }

@@ -58,45 +58,44 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 	m_MaxConn = m_FreeConn;
 }
 
-
-//当有请求时，从数据库连接池中返回一个可用连接，更新使用和空闲连接数
 MYSQL *connection_pool::GetConnection()
 {
-	MYSQL *con = NULL;
+    MYSQL *con = NULL;
+    if (0 == connList.size()) {
+        LOG_ERROR("Connection pool is empty!");
+        return NULL;
+    }
 
-	if (0 == connList.size())
-		return NULL;
+    reserve.wait();
+    lock.lock();
 
-	reserve.wait();
-	
-	lock.lock();
+    con = connList.front();
+    connList.pop_front();
+    --m_FreeConn;
+    ++m_CurConn;
 
-	con = connList.front();
-	connList.pop_front();
+    lock.unlock();
 
-	--m_FreeConn;
-	++m_CurConn;
-
-	lock.unlock();
-	return con;
+    LOG_INFO("MySQL Pool: Got connection %p | Free=%d, Used=%d", 
+             static_cast<void*>(con), m_FreeConn, m_CurConn);
+    return con;
 }
-
 //释放当前使用的连接
 bool connection_pool::ReleaseConnection(MYSQL *con)
 {
-	if (NULL == con)
-		return false;
+    if (NULL == con) return false;
 
-	lock.lock();
+    lock.lock();
+    connList.push_back(con);
+    ++m_FreeConn;
+    --m_CurConn;
+    lock.unlock();
 
-	connList.push_back(con);
-	++m_FreeConn;
-	--m_CurConn;
+    reserve.post();
 
-	lock.unlock();
-
-	reserve.post();
-	return true;
+    LOG_INFO("MySQL Pool: Released connection %p | Free=%d, Used=%d", 
+             static_cast<void*>(con), m_FreeConn, m_CurConn);
+    return true;
 }
 
 //销毁数据库连接池

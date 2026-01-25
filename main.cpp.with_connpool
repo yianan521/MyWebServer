@@ -1,0 +1,50 @@
+#include "config.h"
+
+int main(int argc, char *argv[])
+{
+    //需要修改的数据库信息,登录名,密码,库名
+    string user = "yianan";
+    string passwd = "123456";
+    string databasename = "yourdb";
+
+    //命令行解析
+    Config config;
+    config.parse_arg(argc, argv);
+
+    WebServer server;
+
+    //初始化
+    server.init(config.PORT, user, passwd, databasename, config.LOGWrite,
+                config.OPT_LINGER, config.TRIGMode,  config.sql_num,  config.thread_num,
+                config.close_log, config.actor_model);
+
+    //日志
+    server.log_write();
+
+    //数据库
+    server.sql_pool();
+
+    //线程池
+    server.thread_pool();
+    
+    
+    
+    printf("服务器启动前连接池状态:\n");
+    // 连接池统计会在 init_conn_pool 中显示
+
+    //触发模式
+    server.trig_mode();
+
+    //监听
+    server.eventListen();
+
+    //运行
+    printf("\n=== 服务器开始运行 ===\n");
+
+    printf("等待客户端连接...\n");
+    
+    server.eventLoop();
+
+    printf("\n=== 服务器停止 ===\n");
+    return 0;
+}

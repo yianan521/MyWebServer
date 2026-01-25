@@ -1,0 +1,5 @@
+server
+*.o
+*.log
+logs/
+*.backup
